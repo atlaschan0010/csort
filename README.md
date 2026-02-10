@@ -1,4 +1,4 @@
-# CacheZSort
+# Cachecsort
 
 一个基于 Go 实现的高精度内存排序组件，兼容 Redis ZSet API，但使用 `math/big.Rat` 支持任意精度的小数分数。
 
@@ -14,7 +14,7 @@
 ## 安装
 
 ```bash
-go get github.com/atlas/cache-zsort
+go get github.com/atlaschan000/csort
 ```
 
 ## 快速开始
@@ -25,12 +25,12 @@ package main
 import (
 	"fmt"
 	"math/big"
-	zsort "github.com/atlas/cache-zsort"
+	csort "github.com/atlaschan000/csort"
 )
 
 func main() {
 	// 创建实例
-	cache := zsort.New()
+	cache := csort.New()
 	
 	// 添加成员（支持高精度小数）
 	score := new(big.Rat)
@@ -130,7 +130,7 @@ Redis 使用 double（64位浮点数）存储分数，对于超长小数会丢�
 // Redis 无法精确存储的分数
 highPrecision := "0.1234567890123456789012345678901234567890"
 
-// CacheZSort 可以精确存储
+// Cachecsort 可以精确存储
 cache.ZAddString("test", "member", highPrecision)
 score, _ := cache.ZScore("test", "member")
 
