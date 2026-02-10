@@ -14,7 +14,7 @@
 ## 安装
 
 ```bash
-go get github.com/atlaschan000/csort
+go get github.com/atlaschan0010/csort
 ```
 
 ## 快速开始
@@ -25,7 +25,7 @@ package main
 import (
 	"fmt"
 	"math/big"
-	csort "github.com/atlaschan000/csort"
+	csort "github.com/atlaschan0010/csort"
 )
 
 func main() {
