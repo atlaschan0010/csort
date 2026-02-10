@@ -7,7 +7,7 @@ import (
 	"github.com/atlaschan0010/csort"
 )
 
-func ExampleCachecsort() {
+func ExampleCacheZSort() {
 	// 创建实例
 	cache := csort.New()
 
@@ -35,19 +35,19 @@ func ExampleCachecsort() {
 	card, _ := cache.ZCard("myzset")
 	fmt.Println("total members:", card)
 
-	// 输出:
+	// Output:
 	// member1 score: 12345678901234567890...
 	// member1 rank: 3
 	// total members: 4
 }
 
-func ExampleCachecsort_highPrecision() {
+func ExampleCacheZSort_highPrecision() {
 	cache := csort.New()
 
 	// Redis 无法精确存储的分数
 	highPrecision := "0.1234567890123456789012345678901234567890"
 
-	// Cachecsort 可以精确存储
+	// CacheZSort 可以精确存储
 	cache.ZAddString("test", "member", highPrecision)
 
 	score, _ := cache.ZScore("test", "member")
@@ -60,11 +60,11 @@ func ExampleCachecsort_highPrecision() {
 		fmt.Println("High precision match!")
 	}
 
-	// 输出:
+	// Output:
 	// High precision match!
 }
 
-func ExampleCachecsort_rangeQuery() {
+func ExampleCacheZSort_rangeQuery() {
 	cache := csort.New()
 
 	// 添加一些数据
@@ -87,7 +87,7 @@ func ExampleCachecsort_rangeQuery() {
 	midRange := cache.ZRange("leaderboard", 1, 3, false)
 	fmt.Println("Rank 1-3:", midRange)
 
-	// 输出:
+	// Output:
 	// Top 3:
 	//   1. david: 300.00000000000000000000
 	//   2. eve: 250.00000000000000000000
@@ -95,7 +95,7 @@ func ExampleCachecsort_rangeQuery() {
 	// Rank 1-3: [charlie bob eve]
 }
 
-func ExampleCachecsort_scoreRange() {
+func ExampleCacheZSort_scoreRange() {
 	cache := csort.New()
 
 	// 添加价格数据
@@ -123,7 +123,7 @@ func ExampleCachecsort_scoreRange() {
 	count := cache.ZCount("prices", min, max)
 	fmt.Println("Count:", count)
 
-	// 输出:
+	// Output:
 	// Items between 10-30:
 	//   item1: $10.99000000000000000000
 	//   item5: $15.00000000000000000000
@@ -131,7 +131,7 @@ func ExampleCachecsort_scoreRange() {
 	// Count: 3
 }
 
-func ExampleCachecsort_increment() {
+func ExampleCacheZSort_increment() {
 	cache := csort.New()
 
 	// 初始化玩家分数
@@ -147,12 +147,12 @@ func ExampleCachecsort_increment() {
 	newScore2, _ := cache.ZIncrBy("game", "player2", big.NewRat(25, 1))
 	fmt.Println("Player2 score:", newScore2)
 
-	// 输出:
+	// Output:
 	// New score: 150.00000000000000000000
 	// Player2 score: 25.00000000000000000000
 }
 
-func ExampleCachecsort_neighbor() {
+func ExampleCacheZSort_neighbor() {
 	cache := csort.New()
 
 	// 添加排行榜数据
@@ -176,7 +176,7 @@ func ExampleCachecsort_neighbor() {
 	_, _, ok = cache.GetNextMember("ranking", "charlie")
 	fmt.Printf("After charlie exists: %v\n", ok)
 
-	// 输出:
+	// Output:
 	// Before bob: alice (score: 100)
 	// After bob: charlie (score: 300)
 	// Before alice exists: false

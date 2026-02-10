@@ -74,7 +74,7 @@ func (c *CacheZSort) ZAdd(key, member string, score *big.Rat) bool {
 	set := c.getOrCreateZSet(key)
 	set.mu.Lock()
 	defer set.mu.Unlock()
-	set.sl.Insert(member, score)
+	set.sl.insertInternal(member, score)
 	return true
 }
 
@@ -105,7 +105,7 @@ func (c *CacheZSort) ZAddMultiple(key string, members map[string]*big.Rat) int {
 
 	count := 0
 	for member, score := range members {
-		set.sl.Insert(member, score)
+		set.sl.insertInternal(member, score)
 		count++
 	}
 	return count
@@ -120,14 +120,9 @@ func (c *CacheZSort) ZRem(key, member string) bool {
 		return false
 	}
 
-	score, ok := set.sl.GetScore(member)
-	if !ok {
-		return false
-	}
-
 	set.mu.Lock()
 	defer set.mu.Unlock()
-	return set.sl.Delete(member, score)
+	return set.sl.DeleteByMember(member)
 }
 
 // ZRemMultiple 删除多个成员
@@ -137,12 +132,13 @@ func (c *CacheZSort) ZRemMultiple(key string, members []string) int {
 		return 0
 	}
 
+	set.mu.Lock()
+	defer set.mu.Unlock()
+
 	count := 0
 	for _, member := range members {
-		if score, ok := set.sl.GetScore(member); ok {
-			if set.sl.Delete(member, score) {
-				count++
-			}
+		if set.sl.DeleteByMember(member) {
+			count++
 		}
 	}
 	return count
@@ -335,8 +331,13 @@ func (c *CacheZSort) ZRevRange(key string, start, stop int, withScores bool) []i
 		return nil
 	}
 
-	// 转换为1-based索引并反转
-	result := set.sl.Range(start+1, stop+1, true)
+	// 转换倒序排名为正序排名（均为 0-based）
+	// 倒序排名 r → 正序排名 (card - 1 - r)
+	fwdStart := card - 1 - stop
+	fwdStop := card - 1 - start
+
+	// 转换为1-based索引，用 reverse 遍历
+	result := set.sl.Range(fwdStart+1, fwdStop+1, true)
 
 	if withScores {
 		output := make([]interface{}, 0, len(result)*2)
@@ -506,10 +507,13 @@ func (c *CacheZSort) ZIncrBy(key, member string, increment *big.Rat) (string, bo
 
 // Del 删除整个有序集合
 func (c *CacheZSort) Del(keys ...string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	count := 0
 	for _, key := range keys {
 		if _, ok := c.sets[key]; ok {
-			c.delZSet(key)
+			delete(c.sets, key)
 			count++
 		}
 	}
@@ -562,6 +566,9 @@ func (c *CacheZSort) ZPopMin(key string, count int) []ScoreMember {
 		return nil
 	}
 
+	set.mu.Lock()
+	defer set.mu.Unlock()
+
 	card := set.sl.Len()
 	if count > card {
 		count = card
@@ -585,6 +592,9 @@ func (c *CacheZSort) ZPopMax(key string, count int) []ScoreMember {
 	if count <= 0 {
 		return nil
 	}
+
+	set.mu.Lock()
+	defer set.mu.Unlock()
 
 	card := set.sl.Len()
 	if count > card {

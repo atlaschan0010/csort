@@ -2,6 +2,7 @@ package csort
 
 import (
 	"math/big"
+	"math/rand/v2"
 	"sync"
 )
 
@@ -16,54 +17,42 @@ type skipNode struct {
 	member   string
 	score    *big.Rat
 	forward  []*skipNode // 前向指针数组
+	span     []int       // 每层的跨度（用于 O(log n) 排名计算）
 	backward *skipNode   // 后向指针，用于反向遍历
 	level    int
 }
 
 // SkipList 跳表实现
 type SkipList struct {
-	head     *skipNode
-	tail     *skipNode
-	length   int
-	level    int
-	maxLevel int
-	p        float64 // 节点晋升概率
-	mu       sync.RWMutex
+	head      *skipNode
+	tail      *skipNode
+	length    int
+	level     int
+	maxLevel  int
+	p         float64              // 节点晋升概率
+	memberMap map[string]*skipNode // member → node 索引（O(1) 查找）
+	mu        sync.RWMutex
 }
 
 // NewSkipList 创建新的跳表
 func NewSkipList() *SkipList {
 	maxLevel := 32
 	return &SkipList{
-		head:     &skipNode{forward: make([]*skipNode, maxLevel)},
-		level:    1,
-		maxLevel: maxLevel,
-		p:        0.25,
+		head:      &skipNode{forward: make([]*skipNode, maxLevel), span: make([]int, maxLevel)},
+		level:     1,
+		maxLevel:  maxLevel,
+		p:         0.25,
+		memberMap: make(map[string]*skipNode),
 	}
 }
 
 // randomLevel 随机生成节点层级
 func (sl *SkipList) randomLevel() int {
 	level := 1
-	for level < sl.maxLevel && randFloat() < sl.p {
+	for level < sl.maxLevel && rand.Float64() < sl.p {
 		level++
 	}
 	return level
-}
-
-// randFloat 简单的随机数生成
-func randFloat() float64 {
-	// 使用简单的伪随机数，避免导入 math/rand
-	return float64(fastRand()%1000) / 1000.0
-}
-
-// fastRand xorshift 快速随机数生成
-func fastRand() uint32 {
-	staticSeed := uint32(1)
-	staticSeed ^= staticSeed << 13
-	staticSeed ^= staticSeed >> 17
-	staticSeed ^= staticSeed << 5
-	return staticSeed
 }
 
 // compare 比较两个分数
@@ -72,50 +61,38 @@ func compare(a, b *big.Rat) int {
 	return a.Cmp(b)
 }
 
-// findNodeByMember 根据成员名查找节点（内部方法，无锁）
-func (sl *SkipList) findNodeByMember(member string) *skipNode {
-	node := sl.head.forward[0]
-	for node != nil {
-		if node.member == member {
-			return node
-		}
-		node = node.forward[0]
-	}
-	return nil
-}
-
 // Insert 插入或更新元素
 func (sl *SkipList) Insert(member string, score *big.Rat) {
 	sl.mu.Lock()
 	defer sl.mu.Unlock()
+	sl.insertInternal(member, score)
+}
 
-	// 先检查成员是否已存在
-	existingNode := sl.findNodeByMember(member)
-	if existingNode != nil {
+// insertInternal 内部插入方法（无锁版本，调用者必须持有写锁）
+func (sl *SkipList) insertInternal(member string, score *big.Rat) {
+	// 检查成员是否已存在
+	if existingNode, exists := sl.memberMap[member]; exists {
 		// 分数相同，不需要更新
 		if compare(existingNode.score, score) == 0 {
 			return
 		}
 		// 分数不同，先删除旧节点
-		update := make([]*skipNode, sl.maxLevel)
-		node := sl.head
-		for i := sl.level - 1; i >= 0; i-- {
-			for node.forward[i] != nil && node.forward[i] != existingNode {
-				node = node.forward[i]
-			}
-			update[i] = node
-		}
-		sl.deleteNode(existingNode, update)
+		sl.deleteByNode(existingNode)
 	}
 
-	// 查找新位置的插入点
+	// 查找插入位置并记录每层的 update 节点和 rank
 	update := make([]*skipNode, sl.maxLevel)
+	rank := make([]int, sl.maxLevel)
 	node := sl.head
 
 	for i := sl.level - 1; i >= 0; i-- {
+		if i < sl.level-1 {
+			rank[i] = rank[i+1]
+		}
 		for node.forward[i] != nil {
 			cmp := compare(node.forward[i].score, score)
 			if cmp < 0 || (cmp == 0 && node.forward[i].member < member) {
+				rank[i] += node.span[i]
 				node = node.forward[i]
 			} else {
 				break
@@ -128,7 +105,9 @@ func (sl *SkipList) Insert(member string, score *big.Rat) {
 	newLevel := sl.randomLevel()
 	if newLevel > sl.level {
 		for i := sl.level; i < newLevel; i++ {
+			rank[i] = 0
 			update[i] = sl.head
+			update[i].span[i] = sl.length
 		}
 		sl.level = newLevel
 	}
@@ -138,13 +117,23 @@ func (sl *SkipList) Insert(member string, score *big.Rat) {
 		member:  member,
 		score:   new(big.Rat).Set(score), // 复制分数
 		forward: make([]*skipNode, newLevel),
+		span:    make([]int, newLevel),
 		level:   newLevel,
 	}
 
-	// 更新指针
+	// 更新指针和跨度
 	for i := 0; i < newLevel; i++ {
 		newNode.forward[i] = update[i].forward[i]
 		update[i].forward[i] = newNode
+
+		// 计算新节点在第 i 层的跨度
+		newNode.span[i] = update[i].span[i] - (rank[0] - rank[i])
+		update[i].span[i] = rank[0] - rank[i] + 1
+	}
+
+	// 更新未涉及层的跨度（增量 +1）
+	for i := newLevel; i < sl.level; i++ {
+		update[i].span[i]++
 	}
 
 	// 更新后向指针
@@ -158,12 +147,41 @@ func (sl *SkipList) Insert(member string, score *big.Rat) {
 	}
 
 	sl.length++
+	sl.memberMap[member] = newNode
 }
 
-// deleteNode 删除节点
+// deleteByNode 通过节点指针删除（内部方法，调用者必须持有写锁）
+func (sl *SkipList) deleteByNode(target *skipNode) {
+	update := make([]*skipNode, sl.maxLevel)
+	node := sl.head
+
+	for i := sl.level - 1; i >= 0; i-- {
+		for node.forward[i] != nil {
+			if node.forward[i] == target {
+				break
+			}
+			cmp := compare(node.forward[i].score, target.score)
+			if cmp < 0 || (cmp == 0 && node.forward[i].member < target.member) {
+				node = node.forward[i]
+			} else {
+				break
+			}
+		}
+		update[i] = node
+	}
+
+	sl.deleteNode(target, update)
+}
+
+// deleteNode 删除节点并更新指针和跨度
 func (sl *SkipList) deleteNode(node *skipNode, update []*skipNode) {
 	for i := 0; i < node.level; i++ {
-		update[i].forward[i] = node.forward[i]
+		if update[i].forward[i] == node {
+			update[i].span[i] += node.span[i] - 1
+			update[i].forward[i] = node.forward[i]
+		} else {
+			update[i].span[i]--
+		}
 	}
 
 	if node.forward[0] != nil {
@@ -176,6 +194,7 @@ func (sl *SkipList) deleteNode(node *skipNode, update []*skipNode) {
 		sl.level--
 	}
 
+	delete(sl.memberMap, node.member)
 	sl.length--
 }
 
@@ -184,48 +203,61 @@ func (sl *SkipList) Delete(member string, score *big.Rat) bool {
 	sl.mu.Lock()
 	defer sl.mu.Unlock()
 
-	update := make([]*skipNode, sl.maxLevel)
+	node, exists := sl.memberMap[member]
+	if !exists {
+		return false
+	}
+
+	// 验证 score 一致性
+	if compare(node.score, score) != 0 {
+		return false
+	}
+
+	sl.deleteByNode(node)
+	return true
+}
+
+// DeleteByMember 仅根据 member 名称删除（不需要 score）
+func (sl *SkipList) DeleteByMember(member string) bool {
+	sl.mu.Lock()
+	defer sl.mu.Unlock()
+
+	node, exists := sl.memberMap[member]
+	if !exists {
+		return false
+	}
+
+	sl.deleteByNode(node)
+	return true
+}
+
+// GetRank 获取成员的排名（从1开始）— O(log n) 通过 span 计算
+func (sl *SkipList) GetRank(member string, score *big.Rat) int {
+	sl.mu.RLock()
+	defer sl.mu.RUnlock()
+
+	rank := 0
 	node := sl.head
 
 	for i := sl.level - 1; i >= 0; i-- {
 		for node.forward[i] != nil {
 			cmp := compare(node.forward[i].score, score)
-			if cmp < 0 || (cmp == 0 && node.forward[i].member < member) {
+			if cmp < 0 || (cmp == 0 && node.forward[i].member <= member) {
+				rank += node.span[i]
 				node = node.forward[i]
+				if node.member == member {
+					return rank
+				}
 			} else {
 				break
 			}
 		}
-		update[i] = node
 	}
 
-	node = node.forward[0]
-	if node != nil && node.member == member && compare(node.score, score) == 0 {
-		sl.deleteNode(node, update)
-		return true
-	}
-	return false
+	return 0 // 未找到
 }
 
-// GetRank 获取成员的排名（从1开始）
-func (sl *SkipList) GetRank(member string, score *big.Rat) int {
-	sl.mu.RLock()
-	defer sl.mu.RUnlock()
-
-	// 线性遍历查找排名
-	rank := 1
-	node := sl.head.forward[0]
-	for node != nil {
-		if node.member == member && compare(node.score, score) == 0 {
-			return rank
-		}
-		node = node.forward[0]
-		rank++
-	}
-	return 0
-}
-
-// GetByRank 根据排名获取成员
+// GetByRank 根据排名获取成员 — O(log n) 通过 span 定位
 func (sl *SkipList) GetByRank(rank int) (string, *big.Rat, bool) {
 	sl.mu.RLock()
 	defer sl.mu.RUnlock()
@@ -234,21 +266,67 @@ func (sl *SkipList) GetByRank(rank int) (string, *big.Rat, bool) {
 		return "", nil, false
 	}
 
-	node := sl.head.forward[0]
-	currentRank := 1
-
-	for node != nil && currentRank < rank {
-		node = node.forward[0]
-		currentRank++
+	node := sl.head
+	traversed := 0
+	for i := sl.level - 1; i >= 0; i-- {
+		for node.forward[i] != nil && traversed+node.span[i] <= rank {
+			traversed += node.span[i]
+			node = node.forward[i]
+		}
+		if traversed == rank {
+			return node.member, new(big.Rat).Set(node.score), true
+		}
 	}
 
-	if node != nil {
-		return node.member, new(big.Rat).Set(node.score), true
+	return "", nil, false
+}
+
+// GetScore 获取成员的分数 — O(1) 通过 memberMap
+func (sl *SkipList) GetScore(member string) (*big.Rat, bool) {
+	sl.mu.RLock()
+	defer sl.mu.RUnlock()
+
+	node, exists := sl.memberMap[member]
+	if !exists {
+		return nil, false
+	}
+	return new(big.Rat).Set(node.score), true
+}
+
+// GetPrevMember 获取前一位成员（分数更小，或分数相同但 member 字典序更小）
+func (sl *SkipList) GetPrevMember(member string) (string, *big.Rat, bool) {
+	sl.mu.RLock()
+	defer sl.mu.RUnlock()
+
+	node, exists := sl.memberMap[member]
+	if !exists {
+		return "", nil, false
+	}
+
+	if node.backward != nil {
+		return node.backward.member, new(big.Rat).Set(node.backward.score), true
 	}
 	return "", nil, false
 }
 
-// Range 获取排名范围内的成员 [start, stop] 闭区间
+// GetNextMember 获取后一位成员（分数更大，或分数相同但 member 字典序更大）
+func (sl *SkipList) GetNextMember(member string) (string, *big.Rat, bool) {
+	sl.mu.RLock()
+	defer sl.mu.RUnlock()
+
+	node, exists := sl.memberMap[member]
+	if !exists {
+		return "", nil, false
+	}
+
+	if node.forward[0] != nil {
+		next := node.forward[0]
+		return next.member, new(big.Rat).Set(next.score), true
+	}
+	return "", nil, false
+}
+
+// Range 获取排名范围内的成员 [start, stop] 闭区间（1-based）
 func (sl *SkipList) Range(start, stop int, reverse bool) []ScoreMember {
 	sl.mu.RLock()
 	defer sl.mu.RUnlock()
@@ -266,40 +344,51 @@ func (sl *SkipList) Range(start, stop int, reverse bool) []ScoreMember {
 	result := make([]ScoreMember, 0, stop-start+1)
 
 	if reverse {
-		// 反向遍历
-		node := sl.tail
-		currentRank := sl.length
-		for node != nil && currentRank > stop {
-			node = node.backward
-			currentRank--
-		}
-		for node != nil && currentRank >= start {
+		// 反向：从 stop 位置开始，向 backward 方向遍历到 start
+		node := sl.getNodeByRankInternal(stop)
+		count := stop - start + 1
+		for node != nil && count > 0 {
 			result = append(result, ScoreMember{
 				Score:  new(big.Rat).Set(node.score),
 				Member: node.member,
 			})
 			node = node.backward
-			currentRank--
+			count--
 		}
 	} else {
-		// 正向遍历
-		node := sl.head.forward[0]
-		currentRank := 1
-		for node != nil && currentRank < start {
-			node = node.forward[0]
-			currentRank++
-		}
-		for node != nil && currentRank <= stop {
+		// 正向：定位到 start 位置
+		node := sl.getNodeByRankInternal(start)
+		for node != nil && start <= stop {
 			result = append(result, ScoreMember{
 				Score:  new(big.Rat).Set(node.score),
 				Member: node.member,
 			})
 			node = node.forward[0]
-			currentRank++
+			start++
 		}
 	}
 
 	return result
+}
+
+// getNodeByRankInternal 根据排名获取节点（内部方法，无锁，O(log n)）
+func (sl *SkipList) getNodeByRankInternal(rank int) *skipNode {
+	if rank < 1 || rank > sl.length {
+		return nil
+	}
+
+	node := sl.head
+	traversed := 0
+	for i := sl.level - 1; i >= 0; i-- {
+		for node.forward[i] != nil && traversed+node.span[i] <= rank {
+			traversed += node.span[i]
+			node = node.forward[i]
+		}
+		if traversed == rank {
+			return node
+		}
+	}
+	return nil
 }
 
 // RangeByScore 根据分数范围获取成员
@@ -323,11 +412,15 @@ func (sl *SkipList) RangeByScore(min, max *big.Rat, reverse bool) []ScoreMember 
 			node = node.backward
 		}
 	} else {
-		// 正向遍历
-		node := sl.head.forward[0]
-		for node != nil && compare(node.score, min) < 0 {
-			node = node.forward[0]
+		// 正向遍历：利用跳表快速定位到 >= min 的第一个节点
+		node := sl.head
+		for i := sl.level - 1; i >= 0; i-- {
+			for node.forward[i] != nil && compare(node.forward[i].score, min) < 0 {
+				node = node.forward[i]
+			}
 		}
+		node = node.forward[0]
+
 		for node != nil && compare(node.score, max) <= 0 {
 			result = append(result, ScoreMember{
 				Score:  new(big.Rat).Set(node.score),
@@ -346,10 +439,15 @@ func (sl *SkipList) CountByScore(min, max *big.Rat) int {
 	defer sl.mu.RUnlock()
 
 	count := 0
-	node := sl.head.forward[0]
-	for node != nil && compare(node.score, min) < 0 {
-		node = node.forward[0]
+	// 利用跳表快速定位
+	node := sl.head
+	for i := sl.level - 1; i >= 0; i-- {
+		for node.forward[i] != nil && compare(node.forward[i].score, min) < 0 {
+			node = node.forward[i]
+		}
 	}
+	node = node.forward[0]
+
 	for node != nil && compare(node.score, max) <= 0 {
 		count++
 		node = node.forward[0]
@@ -362,35 +460,29 @@ func (sl *SkipList) RemoveByScore(min, max *big.Rat) int {
 	sl.mu.Lock()
 	defer sl.mu.Unlock()
 
-	count := 0
-	node := sl.head.forward[0]
-	for node != nil && compare(node.score, min) < 0 {
-		node = node.forward[0]
-	}
-
+	// 收集要删除的节点
 	var toDelete []*skipNode
+	node := sl.head
+	for i := sl.level - 1; i >= 0; i-- {
+		for node.forward[i] != nil && compare(node.forward[i].score, min) < 0 {
+			node = node.forward[i]
+		}
+	}
+	node = node.forward[0]
+
 	for node != nil && compare(node.score, max) <= 0 {
 		toDelete = append(toDelete, node)
 		node = node.forward[0]
 	}
 
 	for _, n := range toDelete {
-		update := make([]*skipNode, sl.maxLevel)
-		current := sl.head
-		for i := sl.level - 1; i >= 0; i-- {
-			for current.forward[i] != nil && current.forward[i] != n {
-				current = current.forward[i]
-			}
-			update[i] = current
-		}
-		sl.deleteNode(n, update)
-		count++
+		sl.deleteByNode(n)
 	}
 
-	return count
+	return len(toDelete)
 }
 
-// RemoveByRank 删除排名范围内的所有成员
+// RemoveByRank 删除排名范围内的所有成员 [start, stop] 1-based
 func (sl *SkipList) RemoveByRank(start, stop int) int {
 	sl.mu.Lock()
 	defer sl.mu.Unlock()
@@ -405,126 +497,44 @@ func (sl *SkipList) RemoveByRank(start, stop int) int {
 		return 0
 	}
 
+	// 定位到 start 位置
+	node := sl.getNodeByRankInternal(start)
+
 	count := 0
-	node := sl.head.forward[0]
-	currentRank := 1
-
-	for node != nil && currentRank < start {
-		node = node.forward[0]
-		currentRank++
-	}
-
-	for node != nil && currentRank <= stop {
+	for node != nil && start+count <= stop {
 		next := node.forward[0]
-		update := make([]*skipNode, sl.maxLevel)
-		current := sl.head
-		for i := sl.level - 1; i >= 0; i-- {
-			for current.forward[i] != nil && current.forward[i] != node {
-				current = current.forward[i]
-			}
-			update[i] = current
-		}
-		sl.deleteNode(node, update)
+		sl.deleteByNode(node)
 		count++
 		node = next
-		currentRank++
 	}
 
 	return count
 }
 
-// Len 返回元素数量
-func (sl *SkipList) Len() int {
-	sl.mu.RLock()
-	defer sl.mu.RUnlock()
-	return sl.length
-}
-
-// GetScore 获取成员的分数
-func (sl *SkipList) GetScore(member string) (*big.Rat, bool) {
-	sl.mu.RLock()
-	defer sl.mu.RUnlock()
-
-	node := sl.head.forward[0]
-	for node != nil {
-		if node.member == member {
-			return new(big.Rat).Set(node.score), true
-		}
-		node = node.forward[0]
-	}
-	return nil, false
-}
-
-// GetPrevMember 获取前一位成员（分数更小，或分数相同但 member 字典序更小）
-// 返回: prevMember, prevScore, exists
-func (sl *SkipList) GetPrevMember(member string) (string, *big.Rat, bool) {
-	sl.mu.RLock()
-	defer sl.mu.RUnlock()
-
-	node := sl.head.forward[0]
-	var prevNode *skipNode
-
-	for node != nil {
-		if node.member == member {
-			// 找到了目标成员
-			if prevNode != nil {
-				return prevNode.member, new(big.Rat).Set(prevNode.score), true
-			}
-			return "", nil, false // 这是第一个成员，没有前一位
-		}
-		prevNode = node
-		node = node.forward[0]
-	}
-	return "", nil, false // 成员不存在
-}
-
-// GetNextMember 获取后一位成员（分数更大，或分数相同但 member 字典序更大）
-// 返回: nextMember, nextScore, exists
-func (sl *SkipList) GetNextMember(member string) (string, *big.Rat, bool) {
-	sl.mu.RLock()
-	defer sl.mu.RUnlock()
-
-	node := sl.head.forward[0]
-
-	for node != nil {
-		if node.member == member {
-			// 找到了目标成员
-			if node.forward[0] != nil {
-				next := node.forward[0]
-				return next.member, new(big.Rat).Set(next.score), true
-			}
-			return "", nil, false // 这是最后一个成员，没有后一位
-		}
-		node = node.forward[0]
-	}
-	return "", nil, false // 成员不存在
-}
+// InRankRange 检查成员是否在指定排名范围内
 func (sl *SkipList) InRankRange(member string, score *big.Rat, start, stop int) bool {
 	sl.mu.RLock()
 	defer sl.mu.RUnlock()
 
 	rank := 0
 	node := sl.head
-	found := false
 
 	for i := sl.level - 1; i >= 0; i-- {
 		for node.forward[i] != nil {
-			if node.forward[i].member == member && compare(node.forward[i].score, score) == 0 {
-				found = true
+			cmp := compare(node.forward[i].score, score)
+			if cmp < 0 || (cmp == 0 && node.forward[i].member <= member) {
+				rank += node.span[i]
+				node = node.forward[i]
+				if node.member == member {
+					return rank >= start && rank <= stop
+				}
+			} else {
 				break
 			}
-			node = node.forward[i]
-			rank++
-		}
-		if found {
-			break
 		}
 	}
 
-	if !found {
-		return false
-	}
-	return rank >= start && rank <= stop
+	return false
 }
 
 // IncrementBy 增加成员的分数
@@ -532,113 +542,29 @@ func (sl *SkipList) IncrementBy(member string, increment *big.Rat) (*big.Rat, bo
 	sl.mu.Lock()
 	defer sl.mu.Unlock()
 
-	// 查找成员
-	node := sl.head.forward[0]
-	for node != nil {
-		if node.member == member {
-			break
-		}
-		node = node.forward[0]
-	}
+	existingNode, exists := sl.memberMap[member]
+	var newScore *big.Rat
 
-	if node == nil {
-		// 成员不存在，直接插入新成员
-		newScore := new(big.Rat).Set(increment)
-		sl.insertInternal(member, newScore)
-		return newScore, true
+	if !exists {
+		// 成员不存在，直接插入
+		newScore = new(big.Rat).Set(increment)
+	} else {
+		// 计算新分数
+		newScore = new(big.Rat).Add(existingNode.score, increment)
+		// 删除旧节点
+		sl.deleteByNode(existingNode)
 	}
-
-	// 保存旧分数并计算新分数
-	newScore := new(big.Rat).Add(node.score, increment)
-
-	// 删除旧节点
-	update := make([]*skipNode, sl.maxLevel)
-	current := sl.head
-	for i := sl.level - 1; i >= 0; i-- {
-		for current.forward[i] != nil && current.forward[i] != node {
-			current = current.forward[i]
-		}
-		update[i] = current
-	}
-	sl.deleteNode(node, update)
 
 	// 插入新节点
 	sl.insertInternal(member, newScore)
-
-	return newScore, true
+	return new(big.Rat).Set(newScore), true
 }
 
-// insertInternal 内部插入方法（无锁版本，调用者必须持有写锁）
-func (sl *SkipList) insertInternal(member string, score *big.Rat) {
-	// 先检查成员是否已存在
-	existingNode := sl.findNodeByMember(member)
-	if existingNode != nil {
-		// 分数相同，不需要更新
-		if compare(existingNode.score, score) == 0 {
-			return
-		}
-		// 分数不同，先删除旧节点
-		update := make([]*skipNode, sl.maxLevel)
-		node := sl.head
-		for i := sl.level - 1; i >= 0; i-- {
-			for node.forward[i] != nil && node.forward[i] != existingNode {
-				node = node.forward[i]
-			}
-			update[i] = node
-		}
-		sl.deleteNode(existingNode, update)
-	}
-
-	// 查找新位置的插入点
-	update := make([]*skipNode, sl.maxLevel)
-	node := sl.head
-
-	for i := sl.level - 1; i >= 0; i-- {
-		for node.forward[i] != nil {
-			cmp := compare(node.forward[i].score, score)
-			if cmp < 0 || (cmp == 0 && node.forward[i].member < member) {
-				node = node.forward[i]
-			} else {
-				break
-			}
-		}
-		update[i] = node
-	}
-
-	// 生成新节点的层级
-	newLevel := sl.randomLevel()
-	if newLevel > sl.level {
-		for i := sl.level; i < newLevel; i++ {
-			update[i] = sl.head
-		}
-		sl.level = newLevel
-	}
-
-	// 创建新节点
-	newNode := &skipNode{
-		member:  member,
-		score:   new(big.Rat).Set(score),
-		forward: make([]*skipNode, newLevel),
-		level:   newLevel,
-	}
-
-	// 更新指针
-	for i := 0; i < newLevel; i++ {
-		newNode.forward[i] = update[i].forward[i]
-		update[i].forward[i] = newNode
-	}
-
-	// 更新后向指针
-	if update[0] != sl.head {
-		newNode.backward = update[0]
-	}
-	if newNode.forward[0] != nil {
-		newNode.forward[0].backward = newNode
-	} else {
-		sl.tail = newNode
-	}
-
-	sl.length++
+// Len 返回元素数量
+func (sl *SkipList) Len() int {
+	sl.mu.RLock()
+	defer sl.mu.RUnlock()
+	return sl.length
 }
 
 // All 获取所有成员（按分数排序）
@@ -663,8 +589,9 @@ func (sl *SkipList) Clear() {
 	sl.mu.Lock()
 	defer sl.mu.Unlock()
 
-	sl.head = &skipNode{forward: make([]*skipNode, sl.maxLevel)}
+	sl.head = &skipNode{forward: make([]*skipNode, sl.maxLevel), span: make([]int, sl.maxLevel)}
 	sl.tail = nil
 	sl.length = 0
 	sl.level = 1
+	sl.memberMap = make(map[string]*skipNode)
 }

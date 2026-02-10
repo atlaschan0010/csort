@@ -1,3 +1,3 @@
 module github.com/atlaschan0010/csort
 
-go 1.21
+go 1.22
